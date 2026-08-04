@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: orders-api
-          image: ghcr.io/shri-hari27/orderpulse-api:latest
+          image: ghcr.io/shri-hari27/orderpulse-api:5aa495f
           ports:
             - containerPort: 8080
           readinessProbe:
