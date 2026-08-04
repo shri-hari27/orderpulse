@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: orders-api
   namespace: default
+  labels:
+    app: orders-api
 spec:
   selector:
     app: orders-api
