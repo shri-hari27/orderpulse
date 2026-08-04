@@ -8,7 +8,7 @@ on:
       - '.github/workflows/ci.yml'
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -54,3 +56,16 @@ jobs:
           tags: |
             ghcr.io/shri-hari27/orderpulse-api:${{ steps.vars.outputs.sha_short }}
             ghcr.io/shri-hari27/orderpulse-api:latest
+
+      - name: Bump image tag in gitops/rollout.yaml
+        run: |
+          sed -i "s|image: ghcr.io/shri-hari27/orderpulse-api:.*|image: ghcr.io/shri-hari27/orderpulse-api:${{ steps.vars.outputs.sha_short }}|" gitops/rollout.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gitops/rollout.yaml
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: bump orders-api image to ${{ steps.vars.outputs.sha_short }} [skip ci]"
+            git push origin HEAD:main
+          fi
