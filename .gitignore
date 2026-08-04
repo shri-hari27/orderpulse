@@ -3,3 +3,4 @@ infra/*.tfvars
 *.pem
 *_key
 *_key.pub
+app/orders-api
