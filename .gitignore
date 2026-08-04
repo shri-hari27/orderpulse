@@ -1,0 +1,5 @@
+infra/.terraform/
+infra/*.tfvars
+*.pem
+*_key
+*_key.pub
