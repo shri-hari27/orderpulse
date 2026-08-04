@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: load-gen
+  namespace: default
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 55
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: load-gen
+              image: curlimages/curl:latest
+              command:
+                - sh
+                - -c
+                - |
+                  end=$((SECONDS+50))
+                  i=0
+                  while [ $SECONDS -lt $end ]; do
+                    i=$((i+1))
+                    curl -s -o /dev/null -X POST http://orders-api.default.svc.cluster.local/orders \
+                      -d "{\"item\":\"load-test-$i\",\"quantity\":1}"
+                    curl -s -o /dev/null http://orders-api.default.svc.cluster.local/orders
+                    sleep 0.5
+                  done
