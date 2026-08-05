@@ -1,105 +1,192 @@
 # OrderPulse
 
+![Terraform](https://img.shields.io/badge/Terraform-844FBA?style=for-the-badge&logo=terraform&logoColor=white)
+![k3s](https://img.shields.io/badge/k3s-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)
+![Argo CD](https://img.shields.io/badge/Argo_CD-EF7B4D?style=for-the-badge&logo=argo&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
+![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)
+![Azure](https://img.shields.io/badge/Azure-0078D4?style=for-the-badge&logo=microsoftazure&logoColor=white)
+
+[![CI](https://github.com/shri-hari27/orderpulse/actions/workflows/ci.yml/badge.svg)](https://github.com/shri-hari27/orderpulse/actions/workflows/ci.yml)
+
 GitOps-driven progressive delivery for an order-processing service: canary
 releases gated on live Prometheus metrics, with fully automated rollback on
 regression, and a designed (not live-wired) AI-assisted incident-triage step.
 
-## What this actually demonstrates
+## Contents
+- [What this demonstrates](#what-this-demonstrates)
+- [Architecture](#architecture)
+- [Screenshots](#screenshots)
+- [How the canary analysis works](#how-the-canary-analysis-works)
+- [Proven, not just designed](#proven-not-just-designed)
+- [Monitoring](#monitoring)
+- [AI-assisted development](#ai-assisted-development)
+- [Repo structure](#repo-structure)
+- [Reproducing the rollback locally](#reproducing-the-rollback-locally)
+- [What I'd add with more time](#what-id-add-with-more-time)
+
+## What this demonstrates
 
 Most portfolio Kubernetes projects stop at "deployed an app to a cluster."
 This one is about what happens next: shipping a change safely, watching it
 prove itself against real traffic before it gets full rollout, and backing
 off automatically the moment it doesn't. That is the core of what
-"progressive delivery" and "canary analysis" mean in a real production
-context, and this repo is a working, tested implementation of it, not a
+**progressive delivery** and **canary analysis** mean in a real production
+context — and this repo is a working, tested implementation of it, not a
 diagram.
 
 ## Architecture
 
-    Azure VM (Standard_D2as_v5, single node)
-    Terraform provisions: resource group, network, NSG (SSH-only), VM
-    cloud-init bootstraps k3s on first boot
+```mermaid
+flowchart TB
+    subgraph CI["GitHub CI/CD"]
+        A[["git push to main"]] --> B["GitHub Actions<br/>lint . vet . build"]
+        B --> C[("GHCR<br/>image registry")]
+        B --> D["gitops/rollout.yaml<br/>image tag bumped"]
+    end
 
-    k3s cluster
-      Argo CD          watches gitops/, auto-syncs, self-heals, prunes
-      Argo Rollouts     replaces plain Deployments with staged canary releases
-      kube-prometheus-stack   Prometheus + Grafana + Alertmanager
-      orders-api        Go service, AI-generated, Prometheus-instrumented
-      load-gen          CronJob generating continuous synthetic traffic
+    D -.->|"Argo CD polls / forced refresh"| E
 
-    GitHub Actions CI
-      push to main -> lint/vet -> build -> push image to GHCR
-                    -> bump image tag in gitops/rollout.yaml -> commit -> push
-    Argo CD detects the change and starts a canary rollout automatically.
+    subgraph K3S["Azure VM - k3s cluster"]
+        E["Argo CD"] --> F["Argo Rollouts"]
+        F --> G["orders-api pods"]
+        H["load-gen CronJob"] -->|traffic| G
+        G -->|"/metrics"| I["Prometheus"]
+        I --> J["Grafana"]
+        F -->|"error rate + p95 latency"| I
+    end
 
-    ## Screenshots
+    classDef cicd fill:#238636,stroke:#2ea043,color:#fff
+    classDef gitops fill:#1f6feb,stroke:#58a6ff,color:#fff
+    classDef rollout fill:#8957e5,stroke:#a371f7,color:#fff
+    classDef monitor fill:#e85d04,stroke:#f77f00,color:#fff
+    classDef app fill:#00add8,stroke:#00b4d8,color:#000
 
-**1. Canary paused at 20%, waiting on the analysis gate**
-![Canary paused at 20%](docs/screenshots/01-canary-paused-20pct.png)
-*Argo Rollouts holds the new revision at 20% traffic before deciding whether to proceed.*
+    class A,B,C cicd
+    class D,E gitops
+    class F,H rollout
+    class I,J monitor
+    class G app
+```
 
-**2. Analysis actively querying Prometheus**
-![Analysis run in progress](docs/screenshots/02-analysis-run-in-progress.png)
-*The AnalysisRun evaluates live error-rate and latency queries against real traffic, mid-check.*
+**Component choices:** single Azure VM + Terraform (no AKS) - control-plane
+cost/ops tradeoff at this scale. k3s over kubeadm - same reasoning, minimal
+footprint for a single node. Argo Rollouts on top of Argo CD (not a
+separate tool) - the actual mechanism for canary analysis, not just sync.
+kube-prometheus-stack - Prometheus, Grafana, and Alertmanager wired
+together with the CRDs the AnalysisTemplate depends on.
 
-**3. Metrics spike the moment the bad revision takes traffic**
+## Screenshots
+
+<table>
+<tr>
+<td width="50%">
+
+**1. Canary paused at 20%**
+![Canary paused](docs/screenshots/01-canary-paused-20pct.png)
+Argo Rollouts holds the new revision at 20% traffic before the analysis gate runs.
+
+</td>
+<td width="50%">
+
+**2. Analysis querying Prometheus**
+![Analysis running](docs/screenshots/02-analysis-run-in-progress.png)
+Live error-rate and latency queries evaluated against real traffic, mid-check.
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**3. Metrics spike on the bad revision**
 ![Grafana spike](docs/screenshots/03-grafana-spike.png)
-*Error rate and p95 latency break sharply from baseline as soon as the canary starts serving requests.*
+Error rate and p95 latency break from baseline the moment the canary takes traffic.
 
-**4. A clearer view of the same spike**
+</td>
+<td width="50%">
+
+**4. Clearer view of the spike**
 ![Grafana spike clear](docs/screenshots/06-grafana-spike-clear.png)
-*Error rate approaching 30%, p95 latency pinned near 1s — well past both analysis thresholds.*
+Error rate near 30%, p95 latency pinned near 1s - both past threshold.
 
-**5. Argo CD's dependency tree after the automated abort**
-![Argo CD degraded tree](docs/screenshots/04-argocd-degraded-tree.png)
-*Multiple AnalysisRuns marked Failed; the canary ReplicaSet already scaled back to zero.*
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**5. Argo CD tree after the abort**
+![Degraded tree](docs/screenshots/04-argocd-degraded-tree.png)
+AnalysisRuns marked Failed; canary already scaled to zero.
+
+</td>
+<td width="50%">
 
 **6. Application state: Degraded**
-![Argo CD degraded tile](docs/screenshots/05-argocd-degraded-tile.png)
-*The abort reflected at the application level — no human ran `kubectl rollout undo`.*
+![Degraded tile](docs/screenshots/05-argocd-degraded-tile.png)
+No human ran `kubectl rollout undo` - this is the automated result.
+
+</td>
+</tr>
+<tr>
+<td colspan="2" align="center">
 
 **7. Recovered: Healthy and Synced**
-![Argo CD healthy tile](docs/screenshots/07-argocd-healthy-tile.png)
-*After reverting the injected failure, the next rollout passes both analysis gates and promotes cleanly.*
+
+![Healthy tile](docs/screenshots/07-argocd-healthy-tile.png)
+
+*After reverting the injected failure, the next rollout passes both gates and promotes cleanly.*
+
+</td>
+</tr>
+</table>
 
 ## How the canary analysis works
 
-`gitops/rollout.yaml` defines a staged rollout: 20% traffic, pause, run
-analysis; 50% traffic, pause, run analysis; 100%. Each analysis step queries
-Prometheus directly (`gitops/analysistemplate.yaml`) for two live signals:
+```mermaid
+flowchart LR
+    S["New revision<br/>deployed"] --> W1["Weight: 20%"]
+    W1 --> P1["Pause"]
+    P1 --> AN1{"Analysis:<br/>error rate and p95<br/>within threshold?"}
+    AN1 -- "Pass" --> W2["Weight: 50%"]
+    AN1 -- "Fail" --> AB["Abort<br/>scale canary to 0<br/>revert to stable"]
+    W2 --> P2["Pause"]
+    P2 --> AN2{"Analysis:<br/>error rate and p95<br/>within threshold?"}
+    AN2 -- "Pass" --> W3["Weight: 100%<br/>Promoted"]
+    AN2 -- "Fail" --> AB
 
-- error rate on `/orders` (5xx responses / total requests)
-- p95 latency on `/orders`
+    classDef pass fill:#238636,stroke:#2ea043,color:#fff
+    classDef fail fill:#da3633,stroke:#f85149,color:#fff
+    classDef gate fill:#9e6a03,stroke:#d29922,color:#fff
 
-If either metric breaches its threshold across the sampled window, Argo
-Rollouts aborts the update automatically, scales the canary to zero, and
-reverts all traffic to the last known-good revision. No human runs
-`kubectl rollout undo` — the decision is made from data, not a person
-watching a dashboard.
+    class W3 pass
+    class AB fail
+    class AN1,AN2 gate
+```
+
+Each analysis step (`gitops/analysistemplate.yaml`) queries Prometheus
+directly for two live signals on `/orders`: **error rate** (5xx / total) and
+**p95 latency**. If either breaches its threshold across the sampled
+window, Argo Rollouts aborts automatically and reverts traffic to the last
+known-good revision - no human runs `kubectl rollout undo`.
 
 ## Proven, not just designed
 
 This was tested live against the running cluster, not just written:
 
-- **Automated abort**: a build with an injected failure rate (`FAIL_RATE`
-  env var in `orders-api`) was deployed. The canary reached 20% weight, the
-  p95-latency analysis failed 2 of 3 sampled windows, and Argo Rollouts
-  aborted automatically — full revert to stable, zero manual intervention.
-- **Clean promotion**: the same fix, reverted, produced a canary that passed
-  both analysis gates and promoted cleanly to 100%.
-
-Both runs are visible in the Argo Rollouts revision history on the live
-cluster; see `docs/example-incident-summary.md` for the actual abort
-message and an example of the AI-generated incident summary that would be
-filed automatically in a live-billed version of this pipeline.
+| Test | Result | Evidence |
+|---|---|---|
+| **Automated abort** - injected `FAIL_RATE=0.6` | Canary reached 20%, p95-latency analysis failed 2/3 windows, Rollouts aborted automatically, full revert to stable | `docs/example-incident-summary.md`, screenshots 3-6 |
+| **Clean promotion** - reverted the failure | Canary passed both analysis gates, promoted cleanly to 100% | screenshot 7 |
 
 ## Monitoring
 
-- `gitops/servicemonitor.yaml` — Prometheus scrape config for orders-api
-- `gitops/prometheusrule.yaml` — 3 alert rules: high error rate, high
+- `gitops/servicemonitor.yaml` - Prometheus scrape config for orders-api
+- `gitops/prometheusrule.yaml` - 3 alert rules: high error rate, high
   latency, and target-down (a distinct failure mode a latency/error alert
   alone would miss entirely)
-- `monitoring/grafana-dashboard.json` — request rate by status, error rate
+- `monitoring/grafana-dashboard.json` - request rate by status, error rate
   %, and p95 latency broken out by pod (so a canary pod's degradation is
   visible separately from stable pods during a rollout)
 
@@ -113,22 +200,24 @@ filed automatically in a live-billed version of this pipeline.
   status message, AnalysisRun results, and recent pod logs, send them to
   the Claude API, and file the returned summary as a GitHub Issue
   automatically. Left unwired in this build deliberately, to avoid a paid
-  API dependency for a time-boxed portfolio project — see
+  API dependency for a time-boxed portfolio project - see
   `docs/example-incident-summary.md` for a representative example of its
   output against this project's real abort data.
 
 ## Repo structure
 
-    orderpulse/
-    ├── app/                  orders-api (Go), Dockerfile
-    ├── gitops/               Argo CD Application, Rollout, Service,
-    │                         AnalysisTemplate, ServiceMonitor, PrometheusRule,
-    │                         load-gen CronJob
-    ├── infra/                Terraform: VM, network, NSG, cloud-init
-    ├── monitoring/            kube-prometheus-stack values, Grafana dashboard
-    ├── scripts/               AI incident-triage watcher (design, unwired)
-    ├── docs/                  example incident summary
-    └── .github/workflows/     CI: build, vet, push to GHCR, bump gitops tag
+```
+orderpulse/
+├── app/                  orders-api (Go), Dockerfile
+├── gitops/               Argo CD Application, Rollout, Service,
+│                         AnalysisTemplate, ServiceMonitor, PrometheusRule,
+│                         load-gen CronJob
+├── infra/                Terraform: VM, network, NSG, cloud-init
+├── monitoring/           kube-prometheus-stack values, Grafana dashboard
+├── scripts/              AI incident-triage watcher (design, unwired)
+├── docs/                 screenshots, example incident summary
+└── .github/workflows/    CI: build, vet, push to GHCR, bump gitops tag
+```
 
 ## Reproducing the rollback locally
 
@@ -138,7 +227,7 @@ filed automatically in a live-billed version of this pipeline.
 3. Watch: `kubectl argo rollouts get rollout orders-api --watch`
 4. Observe the canary abort at the analysis gate and full automatic revert
    to stable.
-5. Remove the env var, commit, push — watch a clean promotion instead.
+5. Remove the env var, commit, push - watch a clean promotion instead.
 
 ## What I'd add with more time
 
@@ -156,6 +245,6 @@ filed automatically in a live-billed version of this pipeline.
 ## Notes on constraints
 
 Built in a hard time/cost budget: single Azure VM, no AKS, no service mesh,
-no DevSecOps tooling — all deliberate scope decisions to keep effort
+no DevSecOps tooling - all deliberate scope decisions to keep effort
 focused on progressive delivery and observability, the actual point of the
 project, documented above rather than treated as unexplained omissions.
