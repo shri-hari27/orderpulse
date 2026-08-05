@@ -21,6 +21,7 @@ regression, and a designed (not live-wired) AI-assisted incident-triage step.
 - [Screenshots](#screenshots)
 - [How the canary analysis works](#how-the-canary-analysis-works)
 - [Proven, not just designed](#proven-not-just-designed)
+- [Troubleshooting log](#troubleshooting-log)
 - [Monitoring](#monitoring)
 - [AI-assisted development](#ai-assisted-development)
 - [Repo structure](#repo-structure)
@@ -179,6 +180,226 @@ This was tested live against the running cluster, not just written:
 |---|---|---|
 | **Automated abort** - injected `FAIL_RATE=0.6` | Canary reached 20%, p95-latency analysis failed 2/3 windows, Rollouts aborted automatically, full revert to stable | `docs/example-incident-summary.md`, screenshots 3-6 |
 | **Clean promotion** - reverted the failure | Canary passed both analysis gates, promoted cleanly to 100% | screenshot 7 |
+
+## Troubleshooting log
+
+Real errors hit while building this, kept here deliberately instead of
+smoothed over — this is most of the actual engineering.
+
+### 1. Terraform state was ephemeral and nearly lost
+
+**Symptom:** after a Cloud Shell session ended, `git`/`terraform` commands
+started failing with `fatal: not a git repository` and a fresh
+`terraform apply` had no memory of resources already created.
+
+**Diagnosis:** Azure Cloud Shell's `$HOME` is ephemeral by design (chosen
+deliberately over mounting a storage account, to avoid an unneeded
+resource) — both the cloned repo and Terraform's local state file were
+wiped between sessions.
+
+**Fix:** migrated to a remote Terraform backend before this could cause
+real damage:
+```bash
+az group create --name orderpulse-tfstate-rg --location centralindia
+az storage account create --name "$STORAGE_ACCOUNT" \
+  --resource-group orderpulse-tfstate-rg --location centralindia \
+  --sku Standard_LRS --allow-blob-public-access false
+az storage container create --name tfstate \
+  --account-name "$STORAGE_ACCOUNT" --auth-mode login
+terraform init -migrate-state
+```
+State now lives in Azure Blob Storage, not local disk — any fresh Cloud
+Shell session just needs `terraform init` to reconnect to it.
+
+### 2. VM SKU capacity restriction
+
+**Symptom:**
+```
+Error: SkuNotAvailable: The requested VM size for resource
+'Standard_B2ms' is currently not available in location 'CentralIndia'
+```
+
+**Diagnosis:** the originally planned burstable SKU had no available
+capacity in the target region at the time of provisioning — a real Azure
+constraint, not a config error.
+
+**Fix:** switched to a non-burstable SKU with equivalent specs (2 vCPU / 8
+GiB), same region, same cost order of magnitude:
+```bash
+# vm.tf
+size = "Standard_D2as_v5"
+```
+```bash
+terraform apply -var="ssh_source_ip=<ip>/32"
+```
+
+### 3. Azure rejected the SSH key type
+
+**Symptom:**
+```
+Error: - the provided ssh-ed25519 SSH key is not supported.
+Only RSA SSH keys are supported by Azure
+```
+
+**Diagnosis:** ed25519 is the modern default for `ssh-keygen`, but Azure's
+`admin_ssh_key` provisioning specifically requires RSA.
+
+**Fix:**
+```bash
+rm -f ~/.ssh/orderpulse_key ~/.ssh/orderpulse_key.pub
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/orderpulse_key -N ""
+terraform apply -var="ssh_source_ip=<ip>/32"
+```
+
+### 4. `kubectl` couldn't read its own kubeconfig
+
+**Symptom:**
+```
+error: error loading config file "/etc/rancher/k3s/k3s.yaml":
+open /etc/rancher/k3s/k3s.yaml: permission denied
+```
+— even after copying the file to `~/.kube/config` and `chown`'ing it.
+
+**Diagnosis:** k3s's bundled `kubectl` is a symlink to the `k3s` binary
+itself, which defaults straight to `/etc/rancher/k3s/k3s.yaml`
+(root-only) rather than falling back to the standard `~/.kube/config`
+path the way a normal `kubectl` binary does.
+
+**Fix:**
+```bash
+mkdir -p ~/.kube
+sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+sudo chown $(id -u):$(id -g) ~/.kube/config
+chmod 600 ~/.kube/config
+export KUBECONFIG=$HOME/.kube/config
+echo 'export KUBECONFIG=$HOME/.kube/config' >> ~/.bashrc
+```
+
+### 5. `ServiceMonitor` silently matched nothing
+
+**Symptom:** Prometheus showed all 4 `orders-api` pods under
+`droppedTargets`, never `activeTargets` — no scrape errors, just silence.
+
+**Diagnosis:** a `ServiceMonitor`'s `spec.selector` matches against the
+**Service object's own `metadata.labels`**, not the Service's pod
+selector and not pod labels directly. The Service only had
+`spec.selector` set (for traffic routing), with no `metadata.labels` at
+all — so the `ServiceMonitor` had nothing to match against.
+
+**Fix:**
+```yaml
+# service.yaml
+metadata:
+  name: orders-api
+  namespace: default
+  labels:
+    app: orders-api   # <-- this line was missing
+```
+```bash
+kubectl patch application orders-api -n argocd --type merge \
+  -p '{"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}}'
+```
+
+### 6. `AnalysisTemplate` rejected as invalid
+
+**Symptom:**
+```
+InvalidSpec: spec.strategy.canary.steps[2].analysis.templates:
+Invalid value: "templateNames: [orders-api-canary-health]":
+args.canary-hash was not resolved
+```
+
+**Diagnosis:** the template declared an `args: - name: canary-hash` block
+(copied from a common Argo Rollouts doc pattern) that neither PromQL
+query actually referenced — an unresolved, unused required argument.
+
+**Fix:** removed the unused `args` block entirely rather than wiring up a
+value nothing needed.
+
+### 7. An imperative rollout restart was silently undone
+
+**Symptom:** `kubectl argo rollouts restart rollout orders-api` appeared
+to do nothing — no new revision, no canary steps triggered.
+
+**Diagnosis:** `restart` only sets `spec.restartAt`, which doesn't change
+the pod template hash (no new hash = no new ReplicaSet = no canary). Even
+if it had done something, Argo CD's `selfHeal: true` would have reverted
+it within seconds anyway, since `restartAt` isn't something Git says
+should be set — a live demonstration of self-heal actually working.
+
+**Fix:** forced a genuine template change through Git instead of an
+imperative command:
+```bash
+python3 -c "
+import datetime
+with open('rollout.yaml') as f: c = f.read()
+ts = datetime.datetime.utcnow().isoformat() + 'Z'
+c = c.replace('labels:\n        app: orders-api',
+              f'labels:\n        app: orders-api\n      annotations:\n        orderpulse.io/restartedAt: \"{ts}\"')
+open('rollout.yaml','w').write(c)
+"
+git add gitops/rollout.yaml && git commit -m "test: force new revision" && git push
+```
+
+### 8. The load generator was silently sending zero requests
+
+**Symptom:** load-gen `Job`s completed in ~5 seconds instead of the
+expected ~40, and `sum(http_requests_total)` in Prometheus returned an
+empty result — no data at all, not even zero.
+
+**Diagnosis:** the script used bash's `$SECONDS` builtin for its loop
+timer, but `curlimages/curl` is Alpine-based and defaults to `ash` (via
+busybox), which doesn't implement `$SECONDS` — it silently evaluated as
+empty, breaking the loop condition immediately. Classic "works in my
+terminal, breaks in the container" bug.
+
+**Fix:** replaced the bash-specific timer with a POSIX-portable counter
+loop:
+```sh
+i=0
+while [ $i -lt 80 ]; do
+  i=$((i+1))
+  curl -s -o /dev/null -X POST http://orders-api.default.svc.cluster.local/orders \
+    -d "{\"item\":\"load-test-$i\",\"quantity\":1}"
+  sleep 0.5
+done
+```
+
+### 9. Windows SSH key permissions blocked every connection
+
+**Symptom:**
+```
+Bad permissions. ... Permissions for 'orderpulse_key' are too open.
+Load key "orderpulse_key": bad permissions
+```
+
+**Diagnosis:** the private key, downloaded from Cloud Shell to Windows,
+inherited overly broad default NTFS permissions.
+
+**Fix:**
+```powershell
+icacls orderpulse_key /inheritance:r
+icacls orderpulse_key /grant:r "$($env:USERNAME):(R)"
+```
+
+### 10. Old Go from `apt` couldn't build the app
+
+**Symptom:** `go mod tidy` failed — the Prometheus client library
+required a newer `go` directive than Ubuntu 22.04's packaged Go
+(`1.18.1`, from 2022) supported.
+
+**Diagnosis:** `apt`'s `golang-go` package lags far behind upstream Go
+releases on LTS distributions.
+
+**Fix:** installed current Go directly from the official tarball instead
+of relying on `apt`:
+```bash
+sudo apt remove -y golang-go
+curl -LO https://go.dev/dl/go1.26.3.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.26.3.linux-amd64.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+```
 
 ## Monitoring
 
