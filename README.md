@@ -32,6 +32,36 @@ diagram.
                     -> bump image tag in gitops/rollout.yaml -> commit -> push
     Argo CD detects the change and starts a canary rollout automatically.
 
+    ## Screenshots
+
+**1. Canary paused at 20%, waiting on the analysis gate**
+![Canary paused at 20%](docs/screenshots/01-canary-paused-20pct.png)
+*Argo Rollouts holds the new revision at 20% traffic before deciding whether to proceed.*
+
+**2. Analysis actively querying Prometheus**
+![Analysis run in progress](docs/screenshots/02-analysis-run-in-progress.png)
+*The AnalysisRun evaluates live error-rate and latency queries against real traffic, mid-check.*
+
+**3. Metrics spike the moment the bad revision takes traffic**
+![Grafana spike](docs/screenshots/03-grafana-spike.png)
+*Error rate and p95 latency break sharply from baseline as soon as the canary starts serving requests.*
+
+**4. A clearer view of the same spike**
+![Grafana spike clear](docs/screenshots/06-grafana-spike-clear.png)
+*Error rate approaching 30%, p95 latency pinned near 1s — well past both analysis thresholds.*
+
+**5. Argo CD's dependency tree after the automated abort**
+![Argo CD degraded tree](docs/screenshots/04-argocd-degraded-tree.png)
+*Multiple AnalysisRuns marked Failed; the canary ReplicaSet already scaled back to zero.*
+
+**6. Application state: Degraded**
+![Argo CD degraded tile](docs/screenshots/05-argocd-degraded-tile.png)
+*The abort reflected at the application level — no human ran `kubectl rollout undo`.*
+
+**7. Recovered: Healthy and Synced**
+![Argo CD healthy tile](docs/screenshots/07-argocd-healthy-tile.png)
+*After reverting the injected failure, the next rollout passes both analysis gates and promotes cleanly.*
+
 ## How the canary analysis works
 
 `gitops/rollout.yaml` defines a staged rollout: 20% traffic, pause, run
