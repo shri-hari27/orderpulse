@@ -13,6 +13,8 @@ spec:
     metadata:
       labels:
         app: orders-api
+      annotations:
+        orderpulse.io/restartedAt: "2026-08-05T05:42:34.698688Z"
     spec:
       containers:
         - name: orders-api
