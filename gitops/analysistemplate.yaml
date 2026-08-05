@@ -4,8 +4,6 @@ metadata:
   name: orders-api-canary-health
   namespace: default
 spec:
-  args:
-    - name: canary-hash
   metrics:
     - name: error-rate
       interval: 15s
