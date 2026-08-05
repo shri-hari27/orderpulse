@@ -42,7 +42,13 @@ spec:
     canary:
       steps:
         - setWeight: 20
-        - pause: {duration: 30s}
+        - pause: {duration: 20s}
+        - analysis:
+            templates:
+              - templateName: orders-api-canary-health
         - setWeight: 50
-        - pause: {duration: 30s}
+        - pause: {duration: 20s}
+        - analysis:
+            templates:
+              - templateName: orders-api-canary-health
         - setWeight: 100
