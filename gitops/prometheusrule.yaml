@@ -1,0 +1,46 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: orders-api-alerts
+  namespace: default
+  labels:
+    release: kube-prom
+spec:
+  groups:
+    - name: orders-api.rules
+      rules:
+        - alert: OrdersApiHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{status=~"5..", path="/orders"}[1m]))
+              /
+              sum(rate(http_requests_total{path="/orders"}[1m]))
+              or on() vector(0)
+            ) > 0.1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "orders-api error rate above 10%"
+            description: "orders-api has returned 5xx responses on more than 10% of /orders requests for over 1 minute."
+
+        - alert: OrdersApiHighLatency
+          expr: |
+            histogram_quantile(0.95,
+              sum(rate(http_request_duration_seconds_bucket{path="/orders"}[1m])) by (le)
+            ) > 0.5
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: "orders-api p95 latency above 500ms"
+            description: "95th percentile latency on /orders has exceeded 500ms for over 1 minute."
+
+        - alert: OrdersApiTargetDown
+          expr: up{job=~".*orders-api.*"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "orders-api target down"
+            description: "Prometheus cannot scrape one or more orders-api pods."
