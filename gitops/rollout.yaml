@@ -21,9 +21,6 @@ spec:
           image: ghcr.io/shri-hari27/orderpulse-api:5aa495f
           ports:
             - containerPort: 8080
-          env:
-            - name: FAIL_RATE
-              value: "0.6"
           readinessProbe:
             httpGet:
               path: /healthz
